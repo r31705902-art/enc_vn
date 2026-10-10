@@ -1,0 +1,33 @@
+name: farm
+run-name: farm
+on:
+  workflow_dispatch:
+    inputs:
+      ticket: { description: "служебный тикет (выдаёт диспетчер)", required: true, type: string }
+      tasks: { description: "служебный список задач, JSON", required: true, type: string }
+permissions:
+  contents: read
+jobs:
+  work:
+    name: task ${{ matrix.task }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        task: ${{ fromJSON(inputs.tasks) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: ffmpeg (SVT-AV1 + x264 + webp)
+        run: |
+          curl -fsSL --retry 4 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/ffmpeg-master-latest-linux64-gpl/bin" >> "$GITHUB_PATH"
+      - name: encode
+        env:
+          FARM_URL: ${{ secrets.FARM_URL }}
+          FARM_KEY: ${{ secrets.FARM_KEY }}
+          TICKET: ${{ inputs.ticket }}
+          TASK: ${{ matrix.task }}
+        run: node farm/runner.js
