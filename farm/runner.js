@@ -13,7 +13,7 @@ const path = require('node:path');
 const { spawn, execFileSync, execFile } = require('node:child_process');
 const execA = (cmd, args) => new Promise((res, rej) => execFile(cmd, args, { encoding: 'utf8', maxBuffer: 32 << 20 }, (e, out, err) => (e ? rej(new Error(String(err || e.message).slice(-800))) : res(out))));
 const kids = new Set();
-
+​
 const FARM_URL = String(process.env.FARM_URL || '').replace(/\/$/, '');
 const FARM_KEY = process.env.FARM_KEY || '';
 const TICKET = process.env.TICKET || '';
@@ -21,7 +21,7 @@ const TASK = String(process.env.TASK || '');
 const FFMPEG = process.env.FFMPEG || 'ffmpeg', FFPROBE = process.env.FFPROBE || 'ffprobe';
 const WORK = process.env.WORK_DIR || path.join(require('node:os').tmpdir(), 'farm');
 const GH = !!process.env.GITHUB_ACTIONS;
-
+​
 if (!FARM_URL || !FARM_KEY || !TICKET || !TASK) { console.error('нет FARM_URL / FARM_KEY / TICKET / TASK'); process.exit(2); }
 const masked = new Set();
 const mask = (s) => { s = String(s || ''); if (s.length < 4 || masked.has(s)) return; masked.add(s); if (GH) console.log('::add-mask::' + s); };
@@ -29,7 +29,7 @@ mask(FARM_URL); mask(new URL(FARM_URL).host); mask(TICKET);
 // любые строки в логах проходят через scrub — на всякий случай, поверх маскировки GitHub
 const scrub = (t) => { t = String(t); for (const s of masked) t = t.split(s).join('***'); return t; };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), scrub(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')));
-
+​
 // ---------- dispatcher api ----------
 async function api(p, body, { method, raw, tries = 6 } = {}) {
   for (let i = 0; ; i++) {
@@ -47,7 +47,7 @@ async function api(p, body, { method, raw, tries = 6 } = {}) {
   }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
+​
 // ---------- minimal Swift client (borrowed token) ----------
 const agents = { 'http:': new http.Agent({ keepAlive: true, maxSockets: 32 }), 'https:': new https.Agent({ keepAlive: true, maxSockets: 32 }) };
 const S = { url: '', token: '', exp: 0, container: '' };
@@ -97,7 +97,7 @@ function pool(n) {
   const next = () => { while (active < n && q.length) { const fn = q.shift(); active++; fn().catch((e) => { err = err || e; }).finally(() => { active--; next(); if (!active && !q.length) idle.splice(0).forEach((f) => f()); }); } };
   return { add: (fn) => { q.push(fn); next(); }, drain: () => new Promise((r) => (!active && !q.length ? r() : idle.push(r))), get err() { return err; } };
 }
-
+​
 // ---------- local range proxy: ffmpeg читает исходник по HTTP, мы тянем только нужные части из хранилища ----------
 async function sourceProxy(job) {
   const parts = job.rawParts, size = job.rawSize;
@@ -131,7 +131,7 @@ async function sourceProxy(job) {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   return { url: `http://127.0.0.1:${server.address().port}/src`, close: () => server.close() };
 }
-
+​
 // ---------- ffmpeg helpers ----------
 function runFF(args, onProgress) {
   return new Promise((resolve, reject) => {
@@ -187,7 +187,7 @@ const snapFps = (num, den) => {
   for (const [n, d] of [[24000, 1001], [24, 1], [25, 1], [30000, 1001], [30, 1], [50, 1], [60000, 1001], [60, 1], [120, 1], [144, 1]]) if (Math.abs(f - n / d) < 0.02) return [n, d];
   return [Math.round(f * 1000), 1000];
 };
-
+​
 async function probe(url) {
   const j = JSON.parse(await execA(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', url]));
   const v = j.streams.find((s) => s.codec_type === 'video'); if (!v) throw new Error('в файле нет видео');
@@ -199,7 +199,7 @@ async function probe(url) {
   if (Math.abs(rot) === 90) [w, h] = [h, w];
   return { w, h, fpsNum: fn, fpsDen: fd, fps: Math.round((fn / fd) * 1000) / 1000, dur: Number(j.format.duration || v.duration || 0), audio: !!a };
 }
-
+​
 // ---------- uploader that streams finished segments while ffmpeg runs ----------
 function uploader(outDir, keyPrefix, dirs, cancelled, transform) {
   const up = pool(8), uploaded = new Map();
@@ -209,7 +209,7 @@ function uploader(outDir, keyPrefix, dirs, cancelled, transform) {
       const f = path.join(outDir, rel); let buf = await fsp.readFile(f);
       if (transform && rel.endsWith('.m4s')) buf = await transform(rel, buf);
       await sput(`${keyPrefix}/${rel}`, buf, rel.endsWith('.m4s') ? 'video/iso.segment' : 'application/octet-stream');
-      uploaded.set(rel, buf.length); await fsp.unlink(f).catch(() => {});
+      uploaded.set(rel, buf.length);
     });
   };
   const scan = async (final) => {
@@ -219,16 +219,32 @@ function uploader(outDir, keyPrefix, dirs, cancelled, transform) {
       for (const f of final ? files : files.slice(0, -1)) put(`${d}/${f}`);
     }
   };
-  return { scan, put, up, uploaded };
+  // проверка: каждый залитый файл реально есть в хранилище и нужного размера; пропавшие — перезаливаем
+  const verify = async () => {
+    for (let round = 1; round <= 4; round++) {
+      const bad = [];
+      const names = [...uploaded.keys()]; let i = 0;
+      await Promise.all(Array.from({ length: 16 }, async () => { while (i < names.length) { const rel = names[i++];
+        try { const sz = await shead(`${keyPrefix}/${rel}`); if (sz !== uploaded.get(rel)) bad.push(rel); } catch { bad.push(rel); } } }));
+      if (!bad.length) { for (const rel of names) await fsp.unlink(path.join(outDir, rel)).catch(() => {}); return round; }
+      log(`проверка: в хранилище нет ${bad.length} файлов, перезаливаю (попытка ${round})`);
+      if (round === 4) throw new Error(`после 4 попыток в хранилище нет ${bad.length} файлов`);
+      await sleep(3000 * round);
+      for (const rel of bad) uploaded.delete(rel);
+      for (const rel of bad) put(rel);
+      await up.drain(); if (up.err) throw up.err;
+    }
+  };
+  return { scan, put, up, uploaded, verify };
 }
-
+​
 // ---------- tasks ----------
 const killAll = () => { for (const k of kids) k.kill('SIGKILL'); };
 let cancelled = false;
 async function heartbeat(progress, info) {
   try { const r = await api('/w/hb', { progress, info }, { tries: 2 }); if (r.cancel && !cancelled) { cancelled = true; log('задача отменена диспетчером'); killAll(); } } catch (e) { if (e.fatal) { cancelled = true; killAll(); } }
 }
-
+​
 async function taskA(spec, src) {
   const job = spec.job, out = path.join(WORK, 'a'); await fsp.mkdir(path.join(out, 'a'), { recursive: true }); await fsp.mkdir(path.join(out, 'sb'), { recursive: true });
   log('probe…');
@@ -248,7 +264,7 @@ async function taskA(spec, src) {
       '-f', 'hls', '-hls_time', String(SEG), '-hls_playlist_type', 'vod', '-hls_segment_type', 'fmp4', '-hls_flags', 'independent_segments',
       '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', path.join(out, 'a', 'seg_%05d.m4s'), path.join(out, 'a', 'index.m3u8')],
     (p) => { pa = Math.min(1, Number(p.out_time_us || 0) / 1e6 / info.dur); }).then(async () => {
-      clearInterval(tick); await U.scan(true); await U.up.drain(); if (U.up.err) throw U.up.err;
+      clearInterval(tick); await U.scan(true); await U.up.drain(); if (U.up.err) throw U.up.err; await U.verify();
       const init = await fsp.readFile(path.join(out, 'a', 'init.mp4')); await sput(`v/${vid}/a/init.mp4`, init, 'video/mp4');
       const segs = parsePlaylist(await fsp.readFile(path.join(out, 'a', 'index.m3u8'), 'utf8')).map(([f, d]) => [f, d, U.uploaded.get(`a/${f}`) || 0]);
       result.audio = { codec: 'mp4a.40.2', init: init.length, segs };
@@ -275,7 +291,7 @@ async function taskA(spec, src) {
   clearInterval(hb);
   return result;
 }
-
+​
 async function taskChunk(spec, src) {
   const k = Number(TASK), plan = spec.plan; if (!plan) throw new Error('нет плана');
   const ch = plan.chunkList[k]; if (!ch) throw new Error('нет куска ' + k);
@@ -318,7 +334,8 @@ async function taskChunk(spec, src) {
   } catch (e) { clearInterval(hb); throw e; } finally { clearInterval(tick); }
   if (cancelled) { clearInterval(hb); throw new Error('canceled'); }
   log(`закодировано за ${((Date.now() - tStart) / 60000).toFixed(1)} мин, дозаливка…`);
-  await U.scan(true); await U.up.drain(); clearInterval(hb); if (U.up.err) throw U.up.err;
+  await U.scan(true); await U.up.drain(); if (U.up.err) { clearInterval(hb); throw U.up.err; }
+  await U.verify().finally(() => clearInterval(hb));
   const res = { renditions: {}, codecs: {}, inits: {} };
   for (const r of L) {
     const dir = path.join(out, r.name), files = await fsp.readdir(dir);
@@ -331,7 +348,7 @@ async function taskChunk(spec, src) {
   }
   return res;
 }
-
+​
 (async () => {
   let src;
   try {
