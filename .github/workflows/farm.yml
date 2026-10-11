@@ -32,7 +32,7 @@ jobs:
       - name: disk + yt-dlp
         if: matrix.task == 'd'
         run: |
-          if sudo mkdir -p /mnt/farm 2>/dev/null && sudo chown "$USER" /mnt/farm; then echo "WORK_DIR=/mnt/farm" >> "$GITHUB_ENV"; fi
+          if sudo mkdir -p /mnt/farm/w 2>/dev/null && sudo chown -R "$USER" /mnt/farm; then echo "WORK_DIR=/mnt/farm/w" >> "$GITHUB_ENV"; fi
           df -h / /mnt 2>/dev/null || true
           python3 -m pip install -q -U "yt-dlp[default]"
       # --- t*: распознавание речи (faster-whisper + sherpa-onnx), модели кэшируются между запусками
