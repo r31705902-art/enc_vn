@@ -58,4 +58,3 @@ jobs:
           TICKET: ${{ inputs.ticket }}
           TASK: ${{ matrix.task }}
         run: node farm/runner.js
-​
