@@ -21,7 +21,8 @@ module.exports = (X) => {
     const n = parseFloat(v); return isFinite(n) ? n : NaN;
   };
   // залить список файлов и убедиться, что они реально лежат в хранилище (Blomp иногда «теряет» PUT)
-  async function putVerified(items, conc = 12) {
+  async function putVerified(items, conc = 6) {
+    const allItems = items;
     const P = pool(conc);
     for (const it of items) P.add(async () => { await sput(it.key, it.buf ?? await fsp.readFile(it.file), it.type || 'application/octet-stream'); it.size = it.buf ? it.buf.length : (await fsp.stat(it.file)).size; });
     await P.drain(); if (P.err) throw P.err;
@@ -29,9 +30,10 @@ module.exports = (X) => {
       const bad = []; const V = pool(16);
       for (const it of items) V.add(async () => { let sz = -1; try { sz = await shead(it.key); } catch {} if (sz !== it.size) bad.push(it); });
       await V.drain();
-      if (!bad.length) return items;
-      if (round >= 4) throw new Error(`в хранилище нет ${bad.length} файлов после 4 попыток`);
-      log(`проверка: нет ${bad.length} файлов, перезаливаю`); await sleep(3000 * round);
+      if (!bad.length) return allItems;
+      if (round >= 8) throw new Error(`в хранилище нет ${bad.length} файлов после 8 попыток`);
+      log(`проверка: нет ${bad.length} файлов, перезаливаю`); await sleep(Math.min(60000, 4000 * 2 ** (round - 1)));
+      items = bad;
       const R = pool(conc); for (const it of bad) R.add(async () => sput(it.key, it.buf ?? await fsp.readFile(it.file), it.type || 'application/octet-stream')); await R.drain(); if (R.err) throw R.err;
     }
   }

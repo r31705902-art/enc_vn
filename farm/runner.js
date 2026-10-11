@@ -76,11 +76,17 @@ async function sget(name, range) {
     } catch (e) { if (i >= 5) throw e; await sleep(1000 * 2 ** i); }
   }
 }
+// размер файла в хранилище; -1 = файла нет. 5xx/сеть — повторяем (503 ≠ «файл пропал»)
 async function shead(name) {
-  const res = await sreq('HEAD', name); res.resume();
-  if (res.statusCode === 401) { await refreshCreds(); return shead(name); }
-  if (res.statusCode >= 300) throw new Error('storage HEAD ' + res.statusCode);
-  return Number(res.headers['content-length'] || 0);
+  for (let i = 0; ; i++) {
+    try {
+      const res = await sreq('HEAD', name); res.resume();
+      if (res.statusCode === 401) { await refreshCreds(); throw new Error('storage 401'); }
+      if (res.statusCode === 404) return -1;
+      if (res.statusCode >= 300) throw new Error('storage HEAD ' + res.statusCode);
+      return Number(res.headers['content-length'] || 0);
+    } catch (e) { if (i >= 7) throw e; await sleep(Math.min(30000, 1000 * 2 ** i) * (0.75 + Math.random() * 0.5)); }
+  }
 }
 async function sput(name, buf, type) {
   for (let i = 0; ; i++) {
@@ -108,7 +114,7 @@ async function sourceProxy(job) {
   const parts = job.rawParts, size = job.rawSize;
   const pname = (i) => `raw/${job.videoId}/p_${String(i).padStart(5, '0')}`;
   const partSize = parts > 1 ? await shead(pname(1)) : size;
-  if (!partSize) throw new Error('raw part size = 0');
+  if (!(partSize > 0)) throw new Error('raw part size = ' + partSize);
   const server = http.createServer(async (req, res) => {
     const m = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || '');
     let a = m ? +m[1] : 0, b = m && m[2] ? Math.min(+m[2], size - 1) : size - 1;
@@ -207,7 +213,7 @@ async function probe(url) {
 
 // ---------- uploader that streams finished segments while ffmpeg runs ----------
 function uploader(outDir, keyPrefix, dirs, cancelled, transform) {
-  const up = pool(8), uploaded = new Map();
+  const up = pool(6), uploaded = new Map(); // 20 раннеров × 6 — Blomp не захлёбывается
   const put = (rel) => {
     if (uploaded.has(rel)) return; uploaded.set(rel, -1);
     up.add(async () => {
@@ -226,18 +232,19 @@ function uploader(outDir, keyPrefix, dirs, cancelled, transform) {
   };
   // проверка: каждый залитый файл реально есть в хранилище и нужного размера; пропавшие — перезаливаем
   const verify = async () => {
-    for (let round = 1; round <= 4; round++) {
-      const bad = [];
-      const names = [...uploaded.keys()]; let i = 0;
-      await Promise.all(Array.from({ length: 16 }, async () => { while (i < names.length) { const rel = names[i++];
+    let names = [...uploaded.keys()]; const all = names.slice();
+    for (let round = 1; round <= 8; round++) {
+      const bad = []; let i = 0;
+      await Promise.all(Array.from({ length: 8 }, async () => { while (i < names.length) { const rel = names[i++];
         try { const sz = await shead(`${keyPrefix}/${rel}`); if (sz !== uploaded.get(rel)) bad.push(rel); } catch { bad.push(rel); } } }));
-      if (!bad.length) { for (const rel of names) await fsp.unlink(path.join(outDir, rel)).catch(() => {}); return round; }
+      if (!bad.length) { for (const rel of all) await fsp.unlink(path.join(outDir, rel)).catch(() => {}); return round; }
       log(`проверка: в хранилище нет ${bad.length} файлов, перезаливаю (попытка ${round})`);
-      if (round === 4) throw new Error(`после 4 попыток в хранилище нет ${bad.length} файлов`);
-      await sleep(3000 * round);
+      if (round === 8) throw new Error(`после 8 попыток в хранилище нет ${bad.length} файлов`);
+      await sleep(Math.min(60000, 4000 * 2 ** (round - 1)));
       for (const rel of bad) uploaded.delete(rel);
       for (const rel of bad) put(rel);
       await up.drain(); if (up.err) throw up.err;
+      names = bad; // дальше проверяем только перезалитые
     }
   };
   return { scan, put, up, uploaded, verify };
