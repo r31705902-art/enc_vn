@@ -3,6 +3,7 @@
 // V_N farm runner — выполняет ОДНУ задачу на GitHub Actions и выходит.
 //   TASK=a   — probe + план + аудио + storyboard + постер
 //   TASK=<n> — видео-кусок n (все качества лесенки)
+//   авто-нарезка (farm/autocut.js): d — скачать по ссылке, t<k> — речь, s — субтитры + нейросеть, i — вступление, p<k> — собрать часть
 // Ничего секретного в этом файле нет: адрес диспетчера и ключ приходят из GitHub Secrets,
 // всё остальное (хранилище, задача) выдаёт диспетчер по одноразовому тикету.
 const http = require('node:http');
@@ -13,7 +14,7 @@ const path = require('node:path');
 const { spawn, execFileSync, execFile } = require('node:child_process');
 const execA = (cmd, args) => new Promise((res, rej) => execFile(cmd, args, { encoding: 'utf8', maxBuffer: 32 << 20 }, (e, out, err) => (e ? rej(new Error(String(err || e.message).slice(-800))) : res(out))));
 const kids = new Set();
-​
+
 const FARM_URL = String(process.env.FARM_URL || '').replace(/\/$/, '');
 const FARM_KEY = process.env.FARM_KEY || '';
 const TICKET = process.env.TICKET || '';
@@ -21,7 +22,7 @@ const TASK = String(process.env.TASK || '');
 const FFMPEG = process.env.FFMPEG || 'ffmpeg', FFPROBE = process.env.FFPROBE || 'ffprobe';
 const WORK = process.env.WORK_DIR || path.join(require('node:os').tmpdir(), 'farm');
 const GH = !!process.env.GITHUB_ACTIONS;
-​
+
 if (!FARM_URL || !FARM_KEY || !TICKET || !TASK) { console.error('нет FARM_URL / FARM_KEY / TICKET / TASK'); process.exit(2); }
 const masked = new Set();
 const mask = (s) => { s = String(s || ''); if (s.length < 4 || masked.has(s)) return; masked.add(s); if (GH) console.log('::add-mask::' + s); };
@@ -29,7 +30,7 @@ mask(FARM_URL); mask(new URL(FARM_URL).host); mask(TICKET);
 // любые строки в логах проходят через scrub — на всякий случай, поверх маскировки GitHub
 const scrub = (t) => { t = String(t); for (const s of masked) t = t.split(s).join('***'); return t; };
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), scrub(a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')));
-​
+
 // ---------- dispatcher api ----------
 async function api(p, body, { method, raw, tries = 6 } = {}) {
   for (let i = 0; ; i++) {
@@ -47,7 +48,7 @@ async function api(p, body, { method, raw, tries = 6 } = {}) {
   }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-​
+
 // ---------- minimal Swift client (borrowed token) ----------
 const agents = { 'http:': new http.Agent({ keepAlive: true, maxSockets: 32 }), 'https:': new https.Agent({ keepAlive: true, maxSockets: 32 }) };
 const S = { url: '', token: '', exp: 0, container: '' };
@@ -97,7 +98,7 @@ function pool(n) {
   const next = () => { while (active < n && q.length) { const fn = q.shift(); active++; fn().catch((e) => { err = err || e; }).finally(() => { active--; next(); if (!active && !q.length) idle.splice(0).forEach((f) => f()); }); } };
   return { add: (fn) => { q.push(fn); next(); }, drain: () => new Promise((r) => (!active && !q.length ? r() : idle.push(r))), get err() { return err; } };
 }
-​
+
 // ---------- local range proxy: ffmpeg читает исходник по HTTP, мы тянем только нужные части из хранилища ----------
 async function sourceProxy(job) {
   const parts = job.rawParts, size = job.rawSize;
@@ -131,7 +132,7 @@ async function sourceProxy(job) {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   return { url: `http://127.0.0.1:${server.address().port}/src`, close: () => server.close() };
 }
-​
+
 // ---------- ffmpeg helpers ----------
 function runFF(args, onProgress) {
   return new Promise((resolve, reject) => {
@@ -187,7 +188,7 @@ const snapFps = (num, den) => {
   for (const [n, d] of [[24000, 1001], [24, 1], [25, 1], [30000, 1001], [30, 1], [50, 1], [60000, 1001], [60, 1], [120, 1], [144, 1]]) if (Math.abs(f - n / d) < 0.02) return [n, d];
   return [Math.round(f * 1000), 1000];
 };
-​
+
 async function probe(url) {
   const j = JSON.parse(await execA(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', url]));
   const v = j.streams.find((s) => s.codec_type === 'video'); if (!v) throw new Error('в файле нет видео');
@@ -199,7 +200,7 @@ async function probe(url) {
   if (Math.abs(rot) === 90) [w, h] = [h, w];
   return { w, h, fpsNum: fn, fpsDen: fd, fps: Math.round((fn / fd) * 1000) / 1000, dur: Number(j.format.duration || v.duration || 0), audio: !!a };
 }
-​
+
 // ---------- uploader that streams finished segments while ffmpeg runs ----------
 function uploader(outDir, keyPrefix, dirs, cancelled, transform) {
   const up = pool(8), uploaded = new Map();
@@ -237,14 +238,14 @@ function uploader(outDir, keyPrefix, dirs, cancelled, transform) {
   };
   return { scan, put, up, uploaded, verify };
 }
-​
+
 // ---------- tasks ----------
 const killAll = () => { for (const k of kids) k.kill('SIGKILL'); };
 let cancelled = false;
 async function heartbeat(progress, info) {
   try { const r = await api('/w/hb', { progress, info }, { tries: 2 }); if (r.cancel && !cancelled) { cancelled = true; log('задача отменена диспетчером'); killAll(); } } catch (e) { if (e.fatal) { cancelled = true; killAll(); } }
 }
-​
+
 async function taskA(spec, src) {
   const job = spec.job, out = path.join(WORK, 'a'); await fsp.mkdir(path.join(out, 'a'), { recursive: true }); await fsp.mkdir(path.join(out, 'sb'), { recursive: true });
   log('probe…');
@@ -291,20 +292,13 @@ async function taskA(spec, src) {
   clearInterval(hb);
   return result;
 }
-​
-async function taskChunk(spec, src) {
-  const k = Number(TASK), plan = spec.plan; if (!plan) throw new Error('нет плана');
-  const ch = plan.chunkList[k]; if (!ch) throw new Error('нет куска ' + k);
-  const { src: info, ladder: L } = plan, st = spec.settings, SEG = st.seg, vid = spec.job.videoId;
-  const fr = `${info.fpsNum}/${info.fpsDen}`, half = `${info.fpsNum}/${info.fpsDen * 2}`;
-  const out = path.join(WORK, 'c' + k);
-  for (const r of L) await fsp.mkdir(path.join(out, r.name), { recursive: true });
-  const t0 = (ch.f0 * info.fpsDen) / info.fpsNum, dur = ch.frames ? (ch.frames * info.fpsDen) / info.fpsNum : info.dur - t0;
-  log(`кусок ${k}/${plan.chunks}: кадры ${ch.f0}…${ch.frames ? ch.f0 + ch.frames : 'конец'} (${dur.toFixed(1)} с), лесенка ${L.map((r) => r.name).join(' ')}`);
-  const seek = Math.max(0, t0 - 0.25 * info.fpsDen / info.fpsNum);
-  let fg = `[0:v]fps=${fr}${ch.frames ? `,trim=end_frame=${ch.frames}` : ''},format=yuv420p,split=${L.length}` + L.map((_, i) => `[b${i}]`).join('') + ';';
+
+// аргументы ffmpeg: один вход → вся лесенка качеств в HLS fMP4 (общие для кусков стрима и вступления)
+function ladderArgs({ L, info, st, out, pre, input, segName, initName }) {
+  const SEG = st.seg, half = `${info.fpsNum}/${info.fpsDen * 2}`;
+  let fg = `[0:v]${pre},format=yuv420p,split=${L.length}` + L.map((_, i) => `[b${i}]`).join('') + ';';
   fg += L.map((r, i) => `[b${i}]${r.half ? `fps=${half},` : ''}scale=-2:${r.h}:flags=bicubic[o${i}]`).join(';');
-  const args = [...(seek > 0 ? ['-ss', seek.toFixed(6)] : []), ...(ch.frames ? ['-t', (dur + 3).toFixed(3)] : []), '-i', src.url, '-filter_complex', fg];
+  const args = [...input, '-filter_complex', fg];
   L.forEach((r, i) => args.push('-map', `[o${i}]`));
   L.forEach((r, i) => {
     const fps = r.half ? info.fpsNum / info.fpsDen / 2 : info.fpsNum / info.fpsDen, g = Math.max(1, Math.round(fps * SEG));
@@ -314,8 +308,23 @@ async function taskChunk(spec, src) {
     args.push('-maxrate:v:' + i, r.maxrate + 'k', '-bufsize:v:' + i, r.maxrate * 2 + 'k');
   });
   args.push('-an', '-f', 'hls', '-hls_time', String(SEG), '-hls_playlist_type', 'vod', '-hls_segment_type', 'fmp4', '-hls_flags', 'independent_segments',
-    '-hls_fmp4_init_filename', 'init.mp4', '-hls_segment_filename', path.join(out, '%v', `c${String(k).padStart(3, '0')}_%05d.m4s`),
+    '-hls_fmp4_init_filename', initName, '-hls_segment_filename', path.join(out, '%v', segName),
     '-var_stream_map', L.map((r, i) => `v:${i},name:${r.name}`).join(' '), path.join(out, '%v', 'index.m3u8'));
+  return args;
+}
+
+async function taskChunk(spec, src) {
+  const k = Number(TASK), plan = spec.plan; if (!plan) throw new Error('нет плана');
+  const ch = plan.chunkList[k]; if (!ch) throw new Error('нет куска ' + k);
+  const { src: info, ladder: L } = plan, st = spec.settings, SEG = st.seg, vid = spec.job.videoId;
+  const fr = `${info.fpsNum}/${info.fpsDen}`;
+  const out = path.join(WORK, 'c' + k);
+  for (const r of L) await fsp.mkdir(path.join(out, r.name), { recursive: true });
+  const t0 = (ch.f0 * info.fpsDen) / info.fpsNum, dur = ch.frames ? (ch.frames * info.fpsDen) / info.fpsNum : info.dur - t0;
+  log(`кусок ${k}/${plan.chunks}: кадры ${ch.f0}…${ch.frames ? ch.f0 + ch.frames : 'конец'} (${dur.toFixed(1)} с), лесенка ${L.map((r) => r.name).join(' ')}`);
+  const seek = Math.max(0, t0 - 0.25 * info.fpsDen / info.fpsNum);
+  const args = ladderArgs({ L, info, st, out, pre: `fps=${fr}${ch.frames ? `,trim=end_frame=${ch.frames}` : ''}`, segName: `c${String(k).padStart(3, '0')}_%05d.m4s`, initName: 'init.mp4',
+    input: [...(seek > 0 ? ['-ss', seek.toFixed(6)] : []), ...(ch.frames ? ['-t', (dur + 3).toFixed(3)] : []), '-i', src.url] });
   // сдвиг времени: тики = f0 * den * timescale / num (точное целое для стандартных fps)
   const tsCache = {};
   const timescale = async (rname) => {
@@ -348,16 +357,19 @@ async function taskChunk(spec, src) {
   }
   return res;
 }
-​
+
 (async () => {
   let src;
   try {
     const spec = await api('/w/spec');
     mask(spec.job.videoId); setCreds(spec.storage);
     await fsp.rm(WORK, { recursive: true, force: true }); await fsp.mkdir(WORK, { recursive: true });
-    src = await sourceProxy(spec.job);
+    if (spec.url) mask(spec.url);
+    if (spec.sum?.llm) { mask(spec.sum.llm.url); mask(spec.sum.llm.key); try { mask(new URL(spec.sum.llm.url).host); } catch {} }
+    if (TASK !== 'd' && TASK !== 'i') src = await sourceProxy(spec.job);
     await heartbeat(0, { stage: 'start' });
-    const result = TASK === 'a' ? await taskA(spec, src) : await taskChunk(spec, src);
+    const AC = require('./autocut')({ api, sget, sput, shead, runFF, execA, uploader, pool, heartbeat, log, mask, scrub, shiftFrag, mdhdTimescale, codecString, parsePlaylist, probe, ladderArgs, sleep, WORK, FFMPEG, FFPROBE, cancelled: () => cancelled });
+    const result = TASK === 'a' ? await taskA(spec, src) : /^\d+$/.test(TASK) ? await taskChunk(spec, src) : await AC.run(TASK, spec, src);
     if (cancelled) { log('отменено'); process.exit(0); }
     await api('/w/done', { result });
     log('готово');
