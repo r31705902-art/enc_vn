@@ -90,7 +90,11 @@ async function sput(name, buf, type) {
       if (res.statusCode === 401) { await refreshCreds(); throw new Error('storage 401'); }
       if (res.statusCode >= 300) throw new Error('storage PUT ' + res.statusCode);
       return;
-    } catch (e) { if (i >= 5) throw e; await sleep(1000 * 2 ** i); }
+    } catch (e) { // Blomp под нагрузкой отвечает 503 минутами — ждём дольше (до ~5 мин суммарно)
+      if (i >= 11) throw e;
+      if (i >= 3) log(`хранилище: ${e.message}, повтор ${i + 1}…`);
+      await sleep(Math.min(45000, 1500 * 2 ** i) * (0.75 + Math.random() * 0.5));
+    }
   }
 }
 function pool(n) {
@@ -363,7 +367,7 @@ async function taskChunk(spec, src) {
   try {
     const spec = await api('/w/spec');
     mask(spec.job.videoId); setCreds(spec.storage);
-    await fsp.rm(WORK, { recursive: true, force: true }); await fsp.mkdir(WORK, { recursive: true });
+    await fsp.mkdir(WORK, { recursive: true }); for (const f of await fsp.readdir(WORK)) await fsp.rm(path.join(WORK, f), { recursive: true, force: true }); // саму папку не трогаем (/mnt/farm)
     if (spec.url) mask(spec.url);
     if (spec.sum?.llm) { mask(spec.sum.llm.url); mask(spec.sum.llm.key); try { mask(new URL(spec.sum.llm.url).host); } catch {} }
     if (TASK !== 'd' && TASK !== 'i') src = await sourceProxy(spec.job);
